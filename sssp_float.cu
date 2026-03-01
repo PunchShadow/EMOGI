@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
     std::string vertex_file, edge_file, weight_file;
     std::string filename;
 
-    bool changed_h, *changed_d, no_src = false, *label_d;
+    bool changed_h, *changed_d, *label_d;
     int c, num_run = 1, arg_num = 0, device = 0;
     impl_type type;
     mem_type mem;
@@ -120,7 +120,7 @@ int main(int argc, char *argv[]) {
     uint64_t *vertexList_h, *vertexList_d;
     EdgeT *edgeList_h, *edgeList_d;
     uint64_t vertex_count, edge_count, weight_count, vertex_size, edge_size, weight_size;
-    uint64_t typeT, src;
+    uint64_t typeT, src = 0;
     uint64_t numblocks_kernel, numblocks_update, numthreads;
 
     float milliseconds;
@@ -135,8 +135,7 @@ int main(int argc, char *argv[]) {
                 arg_num++;
                 break;
             case 'r':
-                if (!no_src)
-                    src = atoll(optarg);
+                src = atoll(optarg);
                 arg_num++;
                 break;
             case 't':
@@ -144,8 +143,6 @@ int main(int argc, char *argv[]) {
                 arg_num++;
                 break;
             case 'i':
-                no_src = true;
-                src = 0;
                 num_run = atoi(optarg);
                 arg_num++;
                 break;
@@ -162,12 +159,12 @@ int main(int argc, char *argv[]) {
             case 'h':
                 printf("8-byte edge SSSP with float (4-byte) edge weight\n");
                 printf("\t-f | input file name (must end with .bel)\n");
-                printf("\t-r | SSSP root (unused when i > 1)\n");
+                printf("\t-r | SSSP root (optional, default=0)\n");
                 printf("\t-t | type of SSSP to run\n");
                 printf("\t   | COALESCE = 1, COALESCE_CHUNK = 2\n");
                 printf("\t-m | memory allocation\n");
                 printf("\t   | GPUMEM = 0, UVM_READONLY = 1, UVM_DIRECT = 2\n");
-                printf("\t-i | number of iterations to run\n");
+                printf("\t-i | number of runs to execute\n");
                 printf("\t-d | GPU device id (default=0)\n");
                 printf("\t-o | edge weight offset (default=0.0)\n");
                 printf("\t-h | help message\n");
@@ -182,12 +179,12 @@ int main(int argc, char *argv[]) {
     if (arg_num < 4) {
         printf("8-byte edge SSSP with float (4-byte) edge weight\n");
         printf("\t-f | input file name (must end with .bel)\n");
-        printf("\t-r | SSSP root (unused when i > 1)\n");
+        printf("\t-r | SSSP root (optional, default=0)\n");
         printf("\t-t | type of SSSP to run\n");
         printf("\t   | COALESCE = 1, COALESCE_CHUNK = 2\n");
         printf("\t-m | memory allocation\n");
         printf("\t   | GPUMEM = 0, UVM_READONLY = 1, UVM_DIRECT = 2\n");
-        printf("\t-i | number of iterations to run\n");
+        printf("\t-i | number of runs to execute\n");
         printf("\t-d | GPU device id (default=0)\n");
         printf("\t-o | edge weight offset (default=0.0)\n");
         printf("\t-h | help message\n");
