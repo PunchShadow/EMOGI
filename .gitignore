@@ -8,3 +8,6 @@ sssp_32
 sssp_float
 pagerank
 pagerank_32
+*.csv
+*.nsys-rep
+*.sqlite

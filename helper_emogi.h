@@ -3,6 +3,7 @@
 
 #include <cuda.h>
 #include <fstream>
+#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <iostream>
@@ -49,8 +50,12 @@ static inline bool emogi_is_el_file(const std::string &filename) {
     return emogi_has_suffix(filename, ".el");
 }
 
+static inline bool emogi_is_bwcsr_file(const std::string &filename) {
+    return emogi_has_suffix(filename, ".bwcsr") || emogi_has_suffix(filename, ".wbcsr");
+}
+
 static inline bool emogi_is_bcsr_file(const std::string &filename) {
-    return emogi_has_suffix(filename, ".bcsr");
+    return emogi_has_suffix(filename, ".bcsr") || emogi_is_bwcsr_file(filename);
 }
 
 static inline bool emogi_load_el_csr(const std::string &path,
@@ -136,12 +141,14 @@ static inline bool emogi_load_el_csr(const std::string &path,
 
 static inline bool emogi_load_bcsr(const std::string &path,
                                    std::vector<uint64_t> &vertex_list,
-                                   std::vector<uint64_t> &edge_list) {
+                                   std::vector<uint64_t> &edge_list,
+                                   std::vector<double> *weight_list = NULL) {
     std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
     if (!file.is_open()) {
         fprintf(stderr, "Binary CSR file open failed: %s\n", path.c_str());
         return false;
     }
+    const bool file_has_weight = emogi_is_bwcsr_file(path);
 
     uint32_t node_count = 0;
     uint32_t edge_count = 0;
@@ -161,28 +168,216 @@ static inline bool emogi_load_bcsr(const std::string &path,
         }
     }
 
-    std::vector<uint32_t> edges(edge_count, 0);
-    if (edge_count > 0) {
-        file.read(reinterpret_cast<char*>(edges.data()), sizeof(uint32_t) * edge_count);
-        if (!file) {
-            fprintf(stderr, "Binary CSR edges read failed: %s\n", path.c_str());
-            return false;
-        }
-    }
-    file.close();
-
     vertex_list.assign(static_cast<size_t>(node_count) + 1, 0);
     for (uint32_t i = 0; i < node_count; i++) {
         vertex_list[i] = row_offsets[i];
     }
     vertex_list[node_count] = edge_count;
 
-    edge_list.resize(edge_count);
-    for (uint32_t i = 0; i < edge_count; i++) {
-        edge_list[i] = edges[i];
+    edge_list.assign(edge_count, 0);
+    if (weight_list != NULL) {
+        weight_list->assign(edge_count, 1.0);
     }
 
+    if (file_has_weight) {
+        struct emogi_edge_weighted_t {
+            uint32_t end;
+            uint32_t w8;
+        };
+
+        std::vector<emogi_edge_weighted_t> weighted_edges(edge_count);
+        if (edge_count > 0) {
+            file.read(reinterpret_cast<char*>(weighted_edges.data()), sizeof(emogi_edge_weighted_t) * edge_count);
+            if (!file) {
+                fprintf(stderr, "Binary CSR weighted edges read failed: %s\n", path.c_str());
+                return false;
+            }
+        }
+
+        for (uint32_t i = 0; i < edge_count; i++) {
+            edge_list[i] = weighted_edges[i].end;
+            if (weight_list != NULL) {
+                (*weight_list)[i] = static_cast<double>(weighted_edges[i].w8);
+            }
+        }
+    } else {
+        std::vector<uint32_t> edges(edge_count, 0);
+        if (edge_count > 0) {
+            file.read(reinterpret_cast<char*>(edges.data()), sizeof(uint32_t) * edge_count);
+            if (!file) {
+                fprintf(stderr, "Binary CSR edges read failed: %s\n", path.c_str());
+                return false;
+            }
+        }
+
+        for (uint32_t i = 0; i < edge_count; i++) {
+            edge_list[i] = edges[i];
+        }
+    }
+
+    file.close();
     return true;
+}
+
+template <typename WeightT>
+static inline bool emogi_load_bcsr_host_arrays(const std::string &path,
+                                               uint64_t **vertex_list,
+                                               uint64_t **edge_list,
+                                               WeightT **weight_list,
+                                               uint64_t *vertex_count,
+                                               uint64_t *edge_count) {
+    std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        fprintf(stderr, "Binary CSR file open failed: %s\n", path.c_str());
+        return false;
+    }
+
+    const bool file_has_weight = emogi_is_bwcsr_file(path);
+    uint32_t node_count_u32 = 0;
+    uint32_t edge_count_u32 = 0;
+    *vertex_list = NULL;
+    *edge_list = NULL;
+    if (weight_list != NULL) {
+        *weight_list = NULL;
+    }
+
+    file.read(reinterpret_cast<char*>(&node_count_u32), sizeof(uint32_t));
+    file.read(reinterpret_cast<char*>(&edge_count_u32), sizeof(uint32_t));
+    if (!file) {
+        fprintf(stderr, "Binary CSR header read failed: %s\n", path.c_str());
+        return false;
+    }
+
+    *vertex_count = static_cast<uint64_t>(node_count_u32);
+    *edge_count = static_cast<uint64_t>(edge_count_u32);
+
+    const size_t vertex_size = (static_cast<size_t>(node_count_u32) + 1) * sizeof(uint64_t);
+    const size_t edge_size = static_cast<size_t>(edge_count_u32) * sizeof(uint64_t);
+    const size_t weight_size = static_cast<size_t>(edge_count_u32) * sizeof(WeightT);
+
+    *vertex_list = (uint64_t*)malloc(vertex_size);
+    *edge_list = (uint64_t*)malloc(edge_size);
+    if ((node_count_u32 > 0 && *vertex_list == NULL) || (edge_count_u32 > 0 && *edge_list == NULL)) {
+        fprintf(stderr, "Binary CSR host allocation failed: %s\n", path.c_str());
+        free(*vertex_list);
+        free(*edge_list);
+        *vertex_list = NULL;
+        *edge_list = NULL;
+        return false;
+    }
+
+    if (weight_list != NULL) {
+        *weight_list = (WeightT*)malloc(weight_size);
+        if (edge_count_u32 > 0 && *weight_list == NULL) {
+            fprintf(stderr, "Binary CSR weight allocation failed: %s\n", path.c_str());
+            free(*vertex_list);
+            free(*edge_list);
+            *vertex_list = NULL;
+            *edge_list = NULL;
+            return false;
+        }
+    }
+
+    if (node_count_u32 > 0) {
+        const size_t row_chunk_size = std::min<uint64_t>(node_count_u32, 1ULL << 20);
+        std::vector<uint32_t> row_offsets(row_chunk_size, 0);
+        for (uint64_t base = 0; base < *vertex_count; base += row_chunk_size) {
+            const size_t chunk = static_cast<size_t>(std::min<uint64_t>(row_chunk_size, *vertex_count - base));
+            file.read(reinterpret_cast<char*>(row_offsets.data()), sizeof(uint32_t) * chunk);
+            if (!file) {
+                fprintf(stderr, "Binary CSR row offsets read failed: %s\n", path.c_str());
+                free(*vertex_list);
+                free(*edge_list);
+                if (weight_list != NULL) {
+                    free(*weight_list);
+                    *weight_list = NULL;
+                }
+                *vertex_list = NULL;
+                *edge_list = NULL;
+                return false;
+            }
+
+            for (size_t i = 0; i < chunk; i++) {
+                (*vertex_list)[base + i] = static_cast<uint64_t>(row_offsets[i]);
+            }
+        }
+    }
+    (*vertex_list)[*vertex_count] = *edge_count;
+
+    if (file_has_weight) {
+        struct emogi_edge_weighted_t {
+            uint32_t end;
+            uint32_t w8;
+        };
+
+        if (edge_count_u32 > 0) {
+            const size_t edge_chunk_size = std::min<uint64_t>(edge_count_u32, 1ULL << 20);
+            std::vector<emogi_edge_weighted_t> weighted_edges(edge_chunk_size);
+            for (uint64_t base = 0; base < *edge_count; base += edge_chunk_size) {
+                const size_t chunk = static_cast<size_t>(std::min<uint64_t>(edge_chunk_size, *edge_count - base));
+                file.read(reinterpret_cast<char*>(weighted_edges.data()), sizeof(emogi_edge_weighted_t) * chunk);
+                if (!file) {
+                    fprintf(stderr, "Binary CSR weighted edges read failed: %s\n", path.c_str());
+                    free(*vertex_list);
+                    free(*edge_list);
+                    if (weight_list != NULL) {
+                        free(*weight_list);
+                        *weight_list = NULL;
+                    }
+                    *vertex_list = NULL;
+                    *edge_list = NULL;
+                    return false;
+                }
+
+                for (size_t i = 0; i < chunk; i++) {
+                    (*edge_list)[base + i] = static_cast<uint64_t>(weighted_edges[i].end);
+                    if (weight_list != NULL) {
+                        (*weight_list)[base + i] = static_cast<WeightT>(weighted_edges[i].w8);
+                    }
+                }
+            }
+        }
+    } else {
+        if (edge_count_u32 > 0) {
+            const size_t edge_chunk_size = std::min<uint64_t>(edge_count_u32, 1ULL << 20);
+            std::vector<uint32_t> edges(edge_chunk_size, 0);
+            for (uint64_t base = 0; base < *edge_count; base += edge_chunk_size) {
+                const size_t chunk = static_cast<size_t>(std::min<uint64_t>(edge_chunk_size, *edge_count - base));
+                file.read(reinterpret_cast<char*>(edges.data()), sizeof(uint32_t) * chunk);
+                if (!file) {
+                    fprintf(stderr, "Binary CSR edges read failed: %s\n", path.c_str());
+                    free(*vertex_list);
+                    free(*edge_list);
+                    if (weight_list != NULL) {
+                        free(*weight_list);
+                        *weight_list = NULL;
+                    }
+                    *vertex_list = NULL;
+                    *edge_list = NULL;
+                    return false;
+                }
+
+                for (size_t i = 0; i < chunk; i++) {
+                    (*edge_list)[base + i] = static_cast<uint64_t>(edges[i]);
+                    if (weight_list != NULL) {
+                        (*weight_list)[base + i] = static_cast<WeightT>(1);
+                    }
+                }
+            }
+        }
+    }
+
+    file.close();
+    return true;
+}
+
+static inline bool emogi_load_bcsr_host_arrays(const std::string &path,
+                                               uint64_t **vertex_list,
+                                               uint64_t **edge_list,
+                                               uint64_t *vertex_count,
+                                               uint64_t *edge_count) {
+    return emogi_load_bcsr_host_arrays<uint32_t>(path, vertex_list, edge_list,
+                                                 (uint32_t**)NULL, vertex_count, edge_count);
 }
 
 #endif

@@ -108,6 +108,11 @@ int main(int argc, char *argv[]) {
     std::ifstream file, file2;
     std::string vertex_file, edge_file, weight_file;
     std::string filename;
+    std::vector<uint64_t> el_vertex;
+    std::vector<uint64_t> el_edges;
+    std::vector<double> el_weights;
+    bool use_el = false;
+    bool use_bcsr = false;
 
     bool changed_h, *changed_d, *label_d;
     int c, num_run = 1, arg_num = 0, device = 0;
@@ -194,86 +199,128 @@ int main(int argc, char *argv[]) {
     checkCudaErrors(cudaEventCreate(&start));
     checkCudaErrors(cudaEventCreate(&end));
 
-    vertex_file = filename + ".col";
-    edge_file = filename + ".dst";
-    weight_file = filename + ".val";
+    use_el = emogi_is_el_file(filename);
+    use_bcsr = emogi_is_bcsr_file(filename);
+    const bool use_preloaded = use_el || use_bcsr;
+
+    if (!use_preloaded) {
+        vertex_file = filename + ".col";
+        edge_file = filename + ".dst";
+        weight_file = filename + ".val";
+    }
 
     std::cout << filename << std::endl;
 
-    // Read files
-    // Start reading vertex list
-    file.open(vertex_file.c_str(), std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        fprintf(stderr, "Vertex file open failed\n");
-        exit(1);
-    }
-
-    file.read((char*)(&vertex_count), 8);
-    file.read((char*)(&typeT), 8);
-
-    vertex_count--;
-
-    printf("Vertex: %lu, ", vertex_count);
-    vertex_size = (vertex_count+1) * sizeof(uint64_t);
-
-    vertexList_h = (uint64_t*)malloc(vertex_size);
-
-    file.read((char*)vertexList_h, vertex_size);
-    file.close();
-
-    // Start reading edge list
-    file.open(edge_file.c_str(), std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        fprintf(stderr, "Edge file open failed\n");
-        exit(1);
-    }
-
-    file.read((char*)(&edge_count), 8);
-    file.read((char*)(&typeT), 8);
-
-    printf("Edge: %lu, ", edge_count);
-    fflush(stdout);
-    edge_size = edge_count * sizeof(EdgeT);
-
     edgeList_h = NULL;
-
-    // Start reading edge weight list
-    file2.open(weight_file.c_str(), std::ios::in | std::ios::binary);
-    if (!file2.is_open()) {
-        fprintf(stderr, "Edge file open failed\n");
-        exit(1);
-    }
-
-    file2.read((char*)(&weight_count), 8);
-    file2.read((char*)(&typeT), 8);
-
-    printf("Weight: %lu\n", weight_count);
-    fflush(stdout);
-    weight_size = weight_count * sizeof(WeightT);
-
     weightList_h = NULL;
+    if (use_el) {
+        if (!emogi_load_el_csr(filename, el_vertex, el_edges, &el_weights)) {
+            exit(1);
+        }
+        vertex_count = el_vertex.size() - 1;
+        edge_count = el_edges.size();
+        weight_count = edge_count;
+        vertex_size = (vertex_count + 1) * sizeof(uint64_t);
+        edge_size = edge_count * sizeof(EdgeT);
+        weight_size = weight_count * sizeof(WeightT);
+
+        vertexList_h = (uint64_t*)malloc(vertex_size);
+        edgeList_h = (EdgeT*)malloc(edge_size);
+        weightList_h = (WeightT*)malloc(weight_size);
+        memcpy(vertexList_h, el_vertex.data(), vertex_size);
+        memcpy(edgeList_h, el_edges.data(), edge_size);
+        for (uint64_t i = 0; i < weight_count; i++)
+            weightList_h[i] = (WeightT)el_weights[i] + offset;
+
+        printf("Vertex: %lu, Edge: %lu, Weight: %lu\n", vertex_count, edge_count, weight_count);
+        fflush(stdout);
+    } else if (use_bcsr) {
+        if (!emogi_load_bcsr_host_arrays(filename, &vertexList_h, &edgeList_h, &weightList_h, &vertex_count, &edge_count)) {
+            exit(1);
+        }
+        weight_count = edge_count;
+        vertex_size = (vertex_count + 1) * sizeof(uint64_t);
+        edge_size = edge_count * sizeof(EdgeT);
+        weight_size = weight_count * sizeof(WeightT);
+
+        for (uint64_t i = 0; i < weight_count; i++)
+            weightList_h[i] += offset;
+
+        printf("Vertex: %lu, Edge: %lu, Weight: %lu\n", vertex_count, edge_count, weight_count);
+        fflush(stdout);
+    } else {
+        // Read BEL files
+        file.open(vertex_file.c_str(), std::ios::in | std::ios::binary);
+        if (!file.is_open()) {
+            fprintf(stderr, "Vertex file open failed\n");
+            exit(1);
+        }
+
+        file.read((char*)(&vertex_count), 8);
+        file.read((char*)(&typeT), 8);
+        vertex_count--;
+
+        printf("Vertex: %lu, ", vertex_count);
+        vertex_size = (vertex_count+1) * sizeof(uint64_t);
+        vertexList_h = (uint64_t*)malloc(vertex_size);
+        file.read((char*)vertexList_h, vertex_size);
+        file.close();
+
+        file.open(edge_file.c_str(), std::ios::in | std::ios::binary);
+        if (!file.is_open()) {
+            fprintf(stderr, "Edge file open failed\n");
+            exit(1);
+        }
+
+        file.read((char*)(&edge_count), 8);
+        file.read((char*)(&typeT), 8);
+        printf("Edge: %lu, ", edge_count);
+        fflush(stdout);
+        edge_size = edge_count * sizeof(EdgeT);
+
+        file2.open(weight_file.c_str(), std::ios::in | std::ios::binary);
+        if (!file2.is_open()) {
+            fprintf(stderr, "Weight file open failed\n");
+            exit(1);
+        }
+
+        file2.read((char*)(&weight_count), 8);
+        file2.read((char*)(&typeT), 8);
+        printf("Weight: %lu\n", weight_count);
+        fflush(stdout);
+        weight_size = weight_count * sizeof(WeightT);
+    }
 
     switch (mem) {
         case GPUMEM:
-            edgeList_h = (EdgeT*)malloc(edge_size);
-            weightList_h = (WeightT*)malloc(weight_size);
-            file.read((char*)edgeList_h, edge_size);
-            file2.read((char*)weightList_h, weight_size);
+            if (!use_preloaded) {
+                edgeList_h = (EdgeT*)malloc(edge_size);
+                weightList_h = (WeightT*)malloc(weight_size);
+                file.read((char*)edgeList_h, edge_size);
+                file2.read((char*)weightList_h, weight_size);
+            }
             checkCudaErrors(cudaMalloc((void**)&edgeList_d, edge_size));
             checkCudaErrors(cudaMalloc((void**)&weightList_d, weight_size));
 
-            for (uint64_t i = 0; i < weight_count; i++)
-                weightList_h[i] += offset;
+            if (!use_preloaded) {
+                for (uint64_t i = 0; i < weight_count; i++)
+                    weightList_h[i] += offset;
+            }
 
             break;
         case UVM_READONLY:
             checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
             checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
-            file.read((char*)edgeList_d, edge_size);
-            file2.read((char*)weightList_d, weight_size);
+            if (use_preloaded) {
+                memcpy(edgeList_d, edgeList_h, edge_size);
+                memcpy(weightList_d, weightList_h, weight_size);
+            } else {
+                file.read((char*)edgeList_d, edge_size);
+                file2.read((char*)weightList_d, weight_size);
 
-            for (uint64_t i = 0; i < weight_count; i++)
-                weightList_d[i] += offset;
+                for (uint64_t i = 0; i < weight_count; i++)
+                    weightList_d[i] += offset;
+            }
 
             checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetReadMostly, device));
             checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetReadMostly, device));
@@ -281,19 +328,26 @@ int main(int argc, char *argv[]) {
         case UVM_DIRECT:
             checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
             checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
-            file.read((char*)edgeList_d, edge_size);
-            file2.read((char*)weightList_d, weight_size);
+            if (use_preloaded) {
+                memcpy(edgeList_d, edgeList_h, edge_size);
+                memcpy(weightList_d, weightList_h, weight_size);
+            } else {
+                file.read((char*)edgeList_d, edge_size);
+                file2.read((char*)weightList_d, weight_size);
 
-            for (uint64_t i = 0; i < weight_count; i++)
-                weightList_d[i] += offset;
+                for (uint64_t i = 0; i < weight_count; i++)
+                    weightList_d[i] += offset;
+            }
 
             checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetAccessedBy, device));
             checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetAccessedBy, device));
             break;
     }
 
-    file.close();
-    file2.close();
+    if (!use_preloaded) {
+        file.close();
+        file2.close();
+    }
 
     costList_h = (WeightT*)malloc(weight_size);
 
@@ -367,9 +421,11 @@ int main(int argc, char *argv[]) {
             switch (type) {
                 case COALESCE:
                     kernel_coalesce<<<blockDim_kernel, numthreads>>>(label_d, costList_d, newCostList_d, vertex_count, vertexList_d, edgeList_d, weightList_d);
+                    checkCudaErrors(cudaPeekAtLastError());
                     break;
                 case COALESCE_CHUNK:
                     kernel_coalesce_chunk<<<blockDim_kernel, numthreads>>>(label_d, costList_d, newCostList_d, vertex_count, vertexList_d, edgeList_d, weightList_d);
+                    checkCudaErrors(cudaPeekAtLastError());
                     break;
                 default:
                     fprintf(stderr, "Invalid type\n");
@@ -378,6 +434,7 @@ int main(int argc, char *argv[]) {
             }
 
             update<<<blockDim_update, numthreads>>>(label_d, costList_d, newCostList_d, vertex_count, changed_d);
+            checkCudaErrors(cudaPeekAtLastError());
 
             iter++;
 

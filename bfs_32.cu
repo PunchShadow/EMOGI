@@ -104,8 +104,6 @@ int main(int argc, char *argv[]) {
     std::string filename;
     std::vector<uint64_t> el_vertex;
     std::vector<uint64_t> el_edges;
-    std::vector<uint64_t> bcsr_vertex;
-    std::vector<uint64_t> bcsr_edges;
     bool use_el = false;
     bool use_bcsr = false;
 
@@ -224,11 +222,9 @@ int main(int argc, char *argv[]) {
         printf("Vertex: %lu, Edge: %lu\n", vertex_count, edge_count);
         fflush(stdout);
     } else if (use_bcsr) {
-        if (!emogi_load_bcsr(filename, bcsr_vertex, bcsr_edges)) {
+        if (!emogi_load_bcsr_host_arrays(filename, &vertexList_h, &edgeList64_h, &vertex_count, &edge_count)) {
             exit(1);
         }
-        vertex_count = bcsr_vertex.size() - 1;
-        edge_count = bcsr_edges.size();
         if (vertex_count > UINT32_MAX) {
             fprintf(stderr, "Binary CSR has %llu vertices; 32-bit BFS supports up to %u.\n",
                     (unsigned long long)vertex_count, UINT32_MAX);
@@ -237,12 +233,11 @@ int main(int argc, char *argv[]) {
 
         vertex_size = (vertex_count + 1) * sizeof(uint64_t);
         edge_size = edge_count * sizeof(EdgeT);
-        vertexList_h = (uint64_t*)malloc(vertex_size);
         edgeList_h = (EdgeT*)malloc(edge_size);
-        memcpy(vertexList_h, bcsr_vertex.data(), vertex_size);
-        for (uint64_t i = 0; i < edge_count; i++) {
-            edgeList_h[i] = (EdgeT)bcsr_edges[i];
-        }
+        for (uint64_t i = 0; i < edge_count; i++)
+            edgeList_h[i] = (EdgeT)edgeList64_h[i];
+        free(edgeList64_h);
+        edgeList64_h = NULL;
 
         printf("Vertex: %lu, Edge: %lu\n", vertex_count, edge_count);
         fflush(stdout);

@@ -107,6 +107,10 @@ int main(int argc, char *argv[]) {
     std::ifstream file;
     std::string vertex_file, edge_file;
     std::string filename;
+    std::vector<uint64_t> el_vertex;
+    std::vector<uint64_t> el_edges;
+    bool use_el = false;
+    bool use_bcsr = false;
 
     bool changed_h, *changed_d;
     bool *curr_visit_d, *next_visit_d, *comp_check;
@@ -175,48 +179,78 @@ int main(int argc, char *argv[]) {
     checkCudaErrors(cudaEventCreate(&start));
     checkCudaErrors(cudaEventCreate(&end));
 
-    vertex_file = filename + ".col";
-    edge_file = filename + ".dst";
+    use_el = emogi_is_el_file(filename);
+    use_bcsr = emogi_is_bcsr_file(filename);
+    const bool use_preloaded = use_el || use_bcsr;
+
+    if (!use_preloaded) {
+        vertex_file = filename + ".col";
+        edge_file = filename + ".dst";
+    }
 
     std::cout << filename << std::endl;
 
-    // Read files
-    file.open(vertex_file.c_str(), std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        printf("vertex file open failed\n");
-        exit(1);
-    }
-
-    file.read((char*)(&vertex_count), 8);
-    file.read((char*)(&typeT), 8);
-
-    vertex_count--;
-
-    printf("Vertex: %lu, ", vertex_count);
-    vertex_size = (vertex_count+1) * sizeof(uint64_t);
-
-    vertexList_h = (uint64_t*)malloc(vertex_size);
-
-    file.read((char*)vertexList_h, vertex_size);
-    file.close();
-
-    file.open(edge_file.c_str(), std::ios::in | std::ios::binary);
-    if (!file.is_open()) {
-        printf("edge file open failed\n");
-        exit(1);
-    }
-
-    file.read((char*)(&edge_count), 8);
-    file.read((char*)(&typeT), 8);
-
-    printf("Edge: %lu\n", edge_count);
-    fflush(stdout);
-    edge_size = edge_count * sizeof(EdgeT);
-
     edgeList_h = NULL;
+    if (use_el) {
+        if (!emogi_load_el_csr(filename, el_vertex, el_edges, NULL)) {
+            exit(1);
+        }
+        vertex_count = el_vertex.size() - 1;
+        edge_count = el_edges.size();
+        vertex_size = (vertex_count + 1) * sizeof(uint64_t);
+        edge_size = edge_count * sizeof(EdgeT);
 
-    edgeList64_h = (uint64_t*)malloc(edge_count * sizeof(uint64_t));
-    file.read((char*)edgeList64_h, edge_count * sizeof(uint64_t));
+        vertexList_h = (uint64_t*)malloc(vertex_size);
+        memcpy(vertexList_h, el_vertex.data(), vertex_size);
+
+        // Convert 64-bit edges to 32-bit
+        edgeList64_h = (uint64_t*)malloc(edge_count * sizeof(uint64_t));
+        memcpy(edgeList64_h, el_edges.data(), edge_count * sizeof(uint64_t));
+
+        printf("Vertex: %lu, Edge: %lu\n", vertex_count, edge_count);
+        fflush(stdout);
+    } else if (use_bcsr) {
+        if (!emogi_load_bcsr_host_arrays(filename, &vertexList_h, &edgeList64_h, &vertex_count, &edge_count)) {
+            exit(1);
+        }
+        vertex_size = (vertex_count + 1) * sizeof(uint64_t);
+        edge_size = edge_count * sizeof(EdgeT);
+
+        printf("Vertex: %lu, Edge: %lu\n", vertex_count, edge_count);
+        fflush(stdout);
+    } else {
+        // Read BEL files
+        file.open(vertex_file.c_str(), std::ios::in | std::ios::binary);
+        if (!file.is_open()) {
+            fprintf(stderr, "Vertex file open failed\n");
+            exit(1);
+        }
+
+        file.read((char*)(&vertex_count), 8);
+        file.read((char*)(&typeT), 8);
+        vertex_count--;
+
+        printf("Vertex: %lu, ", vertex_count);
+        vertex_size = (vertex_count+1) * sizeof(uint64_t);
+        vertexList_h = (uint64_t*)malloc(vertex_size);
+        file.read((char*)vertexList_h, vertex_size);
+        file.close();
+
+        file.open(edge_file.c_str(), std::ios::in | std::ios::binary);
+        if (!file.is_open()) {
+            fprintf(stderr, "Edge file open failed\n");
+            exit(1);
+        }
+
+        file.read((char*)(&edge_count), 8);
+        file.read((char*)(&typeT), 8);
+        printf("Edge: %lu\n", edge_count);
+        fflush(stdout);
+        edge_size = edge_count * sizeof(EdgeT);
+
+        edgeList64_h = (uint64_t*)malloc(edge_count * sizeof(uint64_t));
+        file.read((char*)edgeList64_h, edge_count * sizeof(uint64_t));
+    }
 
     switch (mem) {
         case GPUMEM:
@@ -246,7 +280,8 @@ int main(int argc, char *argv[]) {
     }
 
     free(edgeList64_h);
-    file.close();
+    if (!use_preloaded)
+        file.close();
 
     // Allocate memory for GPU
     comp_h = (unsigned long long*)malloc(vertex_count * sizeof(unsigned long long));

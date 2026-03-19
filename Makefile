@@ -1,7 +1,9 @@
 NVCC=nvcc
-NVCCFLAGS=-gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70
+NVCCFLAGS=-gencode arch=compute_61,code=sm_61 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_86,code=sm_86
 
-all: bfs bfs_32 cc cc_32 sssp sssp_float sssp_32 pagerank pagerank_32
+.PHONY: cc
+
+all: bfs bfs_32 cc_app cc_32 sssp sssp_float sssp_32 pagerank pagerank_32
 
 bfs: bfs.cu
 	${NVCC} -O3 ${NVCCFLAGS} -o $@ $^
@@ -9,8 +11,10 @@ bfs: bfs.cu
 bfs_32: bfs_32.cu
 	${NVCC} -O3 ${NVCCFLAGS} -o $@ $^
 
-cc: cc.cu
+cc_app: cc.cu
 	${NVCC} -O3 ${NVCCFLAGS} -o $@ $^
+
+cc: cc_app
 
 cc_32: cc_32.cu
 	${NVCC} -O3 ${NVCCFLAGS} -o $@ $^
@@ -31,4 +35,4 @@ pagerank_32: pagerank_32.cu
 	${NVCC} -O3 ${NVCCFLAGS} -o $@ $^
 
 clean:
-	rm -f bfs bfs_32 cc cc_32 sssp sssp_float sssp_32 pagerank pagerank_32
+	rm -f bfs bfs_32 cc cc_app cc_32 sssp sssp_float sssp_32 pagerank pagerank_32
