@@ -186,7 +186,8 @@ int main(int argc, char *argv[]) {
 
     use_el = emogi_is_el_file(filename);
     use_bcsr = emogi_is_bcsr_file(filename);
-    const bool use_preloaded = use_el || use_bcsr;
+    const bool use_bcsr64 = emogi_is_bcsr64_file(filename);
+    const bool use_preloaded = use_el || use_bcsr || use_bcsr64;
 
     if (!use_preloaded) {
         vertex_file = filename + ".col";
@@ -218,6 +219,20 @@ int main(int argc, char *argv[]) {
         weightList_h = (WeightT*)malloc(weight_size);
         for (uint64_t i = 0; i < weight_count; i++)
             weightList_h[i] = (WeightT)el_weights[i] + offset;
+
+        printf("Vertex: %lu, Edge: %lu, Weight: %lu\n", vertex_count, edge_count, weight_count);
+        fflush(stdout);
+    } else if (use_bcsr64) {
+        if (!emogi_load_bcsr64_host_arrays(filename, &vertexList_h, &edgeList64_h, &weightList_h, &vertex_count, &edge_count)) {
+            exit(1);
+        }
+        weight_count = edge_count;
+        vertex_size = (vertex_count + 1) * sizeof(uint64_t);
+        edge_size = edge_count * sizeof(EdgeT);
+        weight_size = weight_count * sizeof(WeightT);
+
+        for (uint64_t i = 0; i < weight_count; i++)
+            weightList_h[i] += offset;
 
         printf("Vertex: %lu, Edge: %lu, Weight: %lu\n", vertex_count, edge_count, weight_count);
         fflush(stdout);

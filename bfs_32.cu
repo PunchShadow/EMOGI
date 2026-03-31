@@ -187,7 +187,8 @@ int main(int argc, char *argv[]) {
 
     use_el = emogi_is_el_file(filename);
     use_bcsr = emogi_is_bcsr_file(filename);
-    const bool use_preloaded = use_el || use_bcsr;
+    const bool use_bcsr64 = emogi_is_bcsr64_file(filename);
+    const bool use_preloaded = use_el || use_bcsr || use_bcsr64;
 
     if (!use_preloaded) {
         vertex_file = filename + ".col";
@@ -218,6 +219,26 @@ int main(int argc, char *argv[]) {
         for (uint64_t i = 0; i < edge_count; i++) {
             edgeList_h[i] = (EdgeT)el_edges[i];
         }
+
+        printf("Vertex: %lu, Edge: %lu\n", vertex_count, edge_count);
+        fflush(stdout);
+    } else if (use_bcsr64) {
+        if (!emogi_load_bcsr64_host_arrays(filename, &vertexList_h, &edgeList64_h, &vertex_count, &edge_count)) {
+            exit(1);
+        }
+        if (vertex_count > UINT32_MAX) {
+            fprintf(stderr, "bcsr64 has %llu vertices; 32-bit BFS supports up to %u.\n",
+                    (unsigned long long)vertex_count, UINT32_MAX);
+            exit(1);
+        }
+
+        vertex_size = (vertex_count + 1) * sizeof(uint64_t);
+        edge_size = edge_count * sizeof(EdgeT);
+        edgeList_h = (EdgeT*)malloc(edge_size);
+        for (uint64_t i = 0; i < edge_count; i++)
+            edgeList_h[i] = (EdgeT)edgeList64_h[i];
+        free(edgeList64_h);
+        edgeList64_h = NULL;
 
         printf("Vertex: %lu, Edge: %lu\n", vertex_count, edge_count);
         fflush(stdout);

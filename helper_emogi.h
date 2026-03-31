@@ -58,6 +58,14 @@ static inline bool emogi_is_bcsr_file(const std::string &filename) {
     return emogi_has_suffix(filename, ".bcsr") || emogi_is_bwcsr_file(filename);
 }
 
+static inline bool emogi_is_bwcsr64_file(const std::string &filename) {
+    return emogi_has_suffix(filename, ".bwcsr64");
+}
+
+static inline bool emogi_is_bcsr64_file(const std::string &filename) {
+    return emogi_has_suffix(filename, ".bcsr64") || emogi_is_bwcsr64_file(filename);
+}
+
 static inline bool emogi_load_el_csr(const std::string &path,
                                      std::vector<uint64_t> &vertex_list,
                                      std::vector<uint64_t> &edge_list,
@@ -378,6 +386,214 @@ static inline bool emogi_load_bcsr_host_arrays(const std::string &path,
                                                uint64_t *edge_count) {
     return emogi_load_bcsr_host_arrays<uint32_t>(path, vertex_list, edge_list,
                                                  (uint32_t**)NULL, vertex_count, edge_count);
+}
+
+static inline bool emogi_load_bcsr64(const std::string &path,
+                                     std::vector<uint64_t> &vertex_list,
+                                     std::vector<uint64_t> &edge_list,
+                                     std::vector<double> *weight_list = NULL) {
+    fprintf(stdout, "Reading bcsr64 format: %s\n", path.c_str());
+    std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        fprintf(stderr, "bcsr64 file open failed: %s\n", path.c_str());
+        return false;
+    }
+    const bool file_has_weight = emogi_is_bwcsr64_file(path);
+
+    uint64_t node_count = 0;
+    uint64_t edge_count = 0;
+    file.read(reinterpret_cast<char*>(&node_count), sizeof(uint64_t));
+    file.read(reinterpret_cast<char*>(&edge_count), sizeof(uint64_t));
+    if (!file) {
+        fprintf(stderr, "bcsr64 header read failed: %s\n", path.c_str());
+        return false;
+    }
+
+    // Read uint64_t offsets directly
+    vertex_list.assign(static_cast<size_t>(node_count) + 1, 0);
+    if (node_count > 0) {
+        file.read(reinterpret_cast<char*>(vertex_list.data()), sizeof(uint64_t) * node_count);
+        if (!file) {
+            fprintf(stderr, "bcsr64 row offsets read failed: %s\n", path.c_str());
+            return false;
+        }
+    }
+    vertex_list[node_count] = edge_count;
+
+    edge_list.assign(edge_count, 0);
+    if (weight_list != NULL) {
+        weight_list->assign(edge_count, 1.0);
+    }
+
+    if (file_has_weight) {
+        // bwcsr64: interleaved {uint64_t end, uint64_t w8} per edge
+        struct emogi_edge_weighted64_t {
+            uint64_t end;
+            uint64_t w8;
+        };
+
+        std::vector<emogi_edge_weighted64_t> weighted_edges(edge_count);
+        if (edge_count > 0) {
+            file.read(reinterpret_cast<char*>(weighted_edges.data()), sizeof(emogi_edge_weighted64_t) * edge_count);
+            if (!file) {
+                fprintf(stderr, "bcsr64 weighted edges read failed: %s\n", path.c_str());
+                return false;
+            }
+        }
+
+        for (uint64_t i = 0; i < edge_count; i++) {
+            edge_list[i] = weighted_edges[i].end;
+            if (weight_list != NULL) {
+                (*weight_list)[i] = static_cast<double>(weighted_edges[i].w8);
+            }
+        }
+    } else {
+        // bcsr64: uint64_t destinations — read directly
+        if (edge_count > 0) {
+            file.read(reinterpret_cast<char*>(edge_list.data()), sizeof(uint64_t) * edge_count);
+            if (!file) {
+                fprintf(stderr, "bcsr64 edges read failed: %s\n", path.c_str());
+                return false;
+            }
+        }
+    }
+
+    file.close();
+    return true;
+}
+
+template <typename WeightT>
+static inline bool emogi_load_bcsr64_host_arrays(const std::string &path,
+                                                 uint64_t **vertex_list,
+                                                 uint64_t **edge_list,
+                                                 WeightT **weight_list,
+                                                 uint64_t *vertex_count,
+                                                 uint64_t *edge_count) {
+    fprintf(stdout, "Reading bcsr64 format (host arrays): %s\n", path.c_str());
+    std::ifstream file(path.c_str(), std::ios::in | std::ios::binary);
+    if (!file.is_open()) {
+        fprintf(stderr, "bcsr64 file open failed: %s\n", path.c_str());
+        return false;
+    }
+
+    const bool file_has_weight = emogi_is_bwcsr64_file(path);
+    *vertex_list = NULL;
+    *edge_list = NULL;
+    if (weight_list != NULL) {
+        *weight_list = NULL;
+    }
+
+    file.read(reinterpret_cast<char*>(vertex_count), sizeof(uint64_t));
+    file.read(reinterpret_cast<char*>(edge_count), sizeof(uint64_t));
+    if (!file) {
+        fprintf(stderr, "bcsr64 header read failed: %s\n", path.c_str());
+        return false;
+    }
+
+    const size_t vertex_size = (static_cast<size_t>(*vertex_count) + 1) * sizeof(uint64_t);
+    const size_t edge_size = static_cast<size_t>(*edge_count) * sizeof(uint64_t);
+    const size_t weight_size = static_cast<size_t>(*edge_count) * sizeof(WeightT);
+
+    *vertex_list = (uint64_t*)malloc(vertex_size);
+    *edge_list = (uint64_t*)malloc(edge_size);
+    if ((*vertex_count > 0 && *vertex_list == NULL) || (*edge_count > 0 && *edge_list == NULL)) {
+        fprintf(stderr, "bcsr64 host allocation failed: %s\n", path.c_str());
+        free(*vertex_list);
+        free(*edge_list);
+        *vertex_list = NULL;
+        *edge_list = NULL;
+        return false;
+    }
+
+    if (weight_list != NULL) {
+        *weight_list = (WeightT*)malloc(weight_size);
+        if (*edge_count > 0 && *weight_list == NULL) {
+            fprintf(stderr, "bcsr64 weight allocation failed: %s\n", path.c_str());
+            free(*vertex_list);
+            free(*edge_list);
+            *vertex_list = NULL;
+            *edge_list = NULL;
+            return false;
+        }
+    }
+
+    // Read uint64_t offsets directly
+    if (*vertex_count > 0) {
+        file.read(reinterpret_cast<char*>(*vertex_list), sizeof(uint64_t) * (*vertex_count));
+        if (!file) {
+            fprintf(stderr, "bcsr64 row offsets read failed: %s\n", path.c_str());
+            free(*vertex_list);
+            free(*edge_list);
+            if (weight_list != NULL) { free(*weight_list); *weight_list = NULL; }
+            *vertex_list = NULL;
+            *edge_list = NULL;
+            return false;
+        }
+    }
+    (*vertex_list)[*vertex_count] = *edge_count;
+
+    if (file_has_weight) {
+        struct emogi_edge_weighted64_t {
+            uint64_t end;
+            uint64_t w8;
+        };
+
+        if (*edge_count > 0) {
+            const size_t chunk_size = std::min<uint64_t>(*edge_count, 1ULL << 20);
+            std::vector<emogi_edge_weighted64_t> weighted_edges(chunk_size);
+            for (uint64_t base = 0; base < *edge_count; base += chunk_size) {
+                const size_t chunk = static_cast<size_t>(std::min<uint64_t>(chunk_size, *edge_count - base));
+                file.read(reinterpret_cast<char*>(weighted_edges.data()), sizeof(emogi_edge_weighted64_t) * chunk);
+                if (!file) {
+                    fprintf(stderr, "bcsr64 weighted edges read failed: %s\n", path.c_str());
+                    free(*vertex_list);
+                    free(*edge_list);
+                    if (weight_list != NULL) { free(*weight_list); *weight_list = NULL; }
+                    *vertex_list = NULL;
+                    *edge_list = NULL;
+                    return false;
+                }
+
+                for (size_t i = 0; i < chunk; i++) {
+                    (*edge_list)[base + i] = weighted_edges[i].end;
+                    if (weight_list != NULL) {
+                        (*weight_list)[base + i] = static_cast<WeightT>(weighted_edges[i].w8);
+                    }
+                }
+            }
+        }
+    } else {
+        // Read uint64_t edges directly
+        if (*edge_count > 0) {
+            file.read(reinterpret_cast<char*>(*edge_list), sizeof(uint64_t) * (*edge_count));
+            if (!file) {
+                fprintf(stderr, "bcsr64 edges read failed: %s\n", path.c_str());
+                free(*vertex_list);
+                free(*edge_list);
+                if (weight_list != NULL) { free(*weight_list); *weight_list = NULL; }
+                *vertex_list = NULL;
+                *edge_list = NULL;
+                return false;
+            }
+            if (weight_list != NULL) {
+                for (uint64_t i = 0; i < *edge_count; i++) {
+                    (*weight_list)[i] = static_cast<WeightT>(1);
+                }
+            }
+        }
+    }
+
+    file.close();
+    return true;
+}
+
+static inline bool emogi_load_bcsr64_host_arrays(const std::string &path,
+                                                 uint64_t **vertex_list,
+                                                 uint64_t **edge_list,
+                                                 uint64_t *vertex_count,
+                                                 uint64_t *edge_count) {
+    return emogi_load_bcsr64_host_arrays<uint32_t>(path, vertex_list, edge_list,
+                                                    (uint32_t**)NULL, vertex_count, edge_count);
 }
 
 #endif
