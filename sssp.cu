@@ -16,7 +16,7 @@
 #define MEM_ALIGN MEM_ALIGN_64
 
 typedef uint64_t EdgeT;
-typedef uint32_t WeightT;
+typedef unsigned long long WeightT;
 
 __global__ void kernel_coalesce(bool *label, const WeightT *costList, WeightT *newCostList, const uint64_t vertex_count, const uint64_t *vertexList, const EdgeT *edgeList, const WeightT *weightList) {
     const uint64_t tid = blockDim.x * BLOCK_SIZE * blockIdx.y + blockDim.x * blockIdx.x + threadIdx.x;
@@ -96,6 +96,7 @@ int main(int argc, char *argv[]) {
     std::vector<double> el_weights;
     bool use_el = false;
     bool use_bcsr = false;
+    bool edges_on_device = false;
 
     bool changed_h, *changed_d, *label_d;
     int c, num_run = 1, arg_num = 0, device = 0;
@@ -219,17 +220,74 @@ int main(int argc, char *argv[]) {
         printf("Vertex: %lu, Edge: %lu, Weight: %lu\n", vertex_count, edge_count, weight_count);
         fflush(stdout);
     } else if (use_bcsr64) {
-        if (!emogi_load_bcsr64_host_arrays(filename, &vertexList_h, &edgeList_h, &weightList_h, &vertex_count, &edge_count)) {
+        fprintf(stdout, "Reading bcsr64 format: %s\n", filename.c_str());
+        const bool file_has_weight = emogi_is_bwcsr64_file(filename);
+        std::ifstream bcsr64_file(filename.c_str(), std::ios::in | std::ios::binary);
+        if (!bcsr64_file.is_open()) {
+            fprintf(stderr, "bcsr64 file open failed: %s\n", filename.c_str());
             exit(1);
         }
+
+        bcsr64_file.read(reinterpret_cast<char*>(&vertex_count), sizeof(uint64_t));
+        bcsr64_file.read(reinterpret_cast<char*>(&edge_count), sizeof(uint64_t));
         weight_count = edge_count;
         vertex_size = (vertex_count + 1) * sizeof(uint64_t);
         edge_size = edge_count * sizeof(EdgeT);
         weight_size = weight_count * sizeof(WeightT);
 
-        for (uint64_t i = 0; i < weight_count; i++)
-            weightList_h[i] += offset;
+        vertexList_h = (uint64_t*)malloc(vertex_size);
+        bcsr64_file.read(reinterpret_cast<char*>(vertexList_h), sizeof(uint64_t) * vertex_count);
+        vertexList_h[vertex_count] = edge_count;
 
+        // For UVM modes, read directly into managed memory to avoid
+        // double-buffering (host + UVM) that causes OOM on large graphs.
+        EdgeT *edge_target;
+        WeightT *weight_target;
+        if (mem == GPUMEM) {
+            edgeList_h = (EdgeT*)malloc(edge_size);
+            weightList_h = (WeightT*)malloc(weight_size);
+            edge_target = edgeList_h;
+            weight_target = weightList_h;
+        } else {
+            checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
+            checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
+            edge_target = edgeList_d;
+            weight_target = weightList_d;
+            edges_on_device = true;
+        }
+
+        if (file_has_weight) {
+            struct ew64_t { uint64_t end; uint64_t w8; };
+            const size_t chunk_size = std::min<uint64_t>(edge_count, 1ULL << 20);
+            std::vector<ew64_t> buf(chunk_size);
+            for (uint64_t base = 0; base < edge_count; base += chunk_size) {
+                const size_t chunk = static_cast<size_t>(std::min<uint64_t>(chunk_size, edge_count - base));
+                bcsr64_file.read(reinterpret_cast<char*>(buf.data()), sizeof(ew64_t) * chunk);
+                for (size_t j = 0; j < chunk; j++) {
+                    edge_target[base + j] = buf[j].end;
+                    weight_target[base + j] = static_cast<WeightT>(buf[j].w8);
+                }
+            }
+        } else {
+            bcsr64_file.read(reinterpret_cast<char*>(edge_target), sizeof(uint64_t) * edge_count);
+            for (uint64_t i = 0; i < weight_count; i++)
+                weight_target[i] = static_cast<WeightT>(1);
+        }
+
+        for (uint64_t i = 0; i < weight_count; i++)
+            weight_target[i] += offset;
+
+        if (edges_on_device) {
+            if (mem == UVM_READONLY) {
+                checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetReadMostly, device));
+                checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetReadMostly, device));
+            } else {
+                checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetAccessedBy, device));
+                checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetAccessedBy, device));
+            }
+        }
+
+        bcsr64_file.close();
         printf("Vertex: %lu, Edge: %lu, Weight: %lu\n", vertex_count, edge_count, weight_count);
         fflush(stdout);
     } else if (use_bcsr) {
@@ -307,38 +365,42 @@ int main(int argc, char *argv[]) {
 
             break;
         case UVM_READONLY:
-            checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
-            checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
-            if (use_preloaded) {
-                memcpy(edgeList_d, edgeList_h, edge_size);
-                memcpy(weightList_d, weightList_h, weight_size);
-            } else {
-                file.read((char*)edgeList_d, edge_size);
-                file2.read((char*)weightList_d, weight_size);
+            if (!edges_on_device) {
+                checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
+                checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
+                if (use_preloaded) {
+                    memcpy(edgeList_d, edgeList_h, edge_size);
+                    memcpy(weightList_d, weightList_h, weight_size);
+                } else {
+                    file.read((char*)edgeList_d, edge_size);
+                    file2.read((char*)weightList_d, weight_size);
 
-                for (uint64_t i = 0; i < weight_count; i++)
-                    weightList_d[i] += offset;
+                    for (uint64_t i = 0; i < weight_count; i++)
+                        weightList_d[i] += offset;
+                }
+
+                checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetReadMostly, device));
+                checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetReadMostly, device));
             }
-
-            checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetReadMostly, device));
-            checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetReadMostly, device));
             break;
         case UVM_DIRECT:
-            checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
-            checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
-            if (use_preloaded) {
-                memcpy(edgeList_d, edgeList_h, edge_size);
-                memcpy(weightList_d, weightList_h, weight_size);
-            } else {
-                file.read((char*)edgeList_d, edge_size);
-                file2.read((char*)weightList_d, weight_size);
+            if (!edges_on_device) {
+                checkCudaErrors(cudaMallocManaged((void**)&edgeList_d, edge_size));
+                checkCudaErrors(cudaMallocManaged((void**)&weightList_d, weight_size));
+                if (use_preloaded) {
+                    memcpy(edgeList_d, edgeList_h, edge_size);
+                    memcpy(weightList_d, weightList_h, weight_size);
+                } else {
+                    file.read((char*)edgeList_d, edge_size);
+                    file2.read((char*)weightList_d, weight_size);
 
-                for (uint64_t i = 0; i < weight_count; i++)
-                    weightList_d[i] += offset;
+                    for (uint64_t i = 0; i < weight_count; i++)
+                        weightList_d[i] += offset;
+                }
+
+                checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetAccessedBy, device));
+                checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetAccessedBy, device));
             }
-
-            checkCudaErrors(cudaMemAdvise(edgeList_d, edge_size, cudaMemAdviseSetAccessedBy, device));
-            checkCudaErrors(cudaMemAdvise(weightList_d, weight_size, cudaMemAdviseSetAccessedBy, device));
             break;
     }
 
