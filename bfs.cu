@@ -373,6 +373,28 @@ int main(int argc, char *argv[]) {
             checkCudaErrors(cudaMemcpy(&changed_h, changed_d, sizeof(bool), cudaMemcpyDeviceToHost));
         } while(changed_h);
 
+        /* PCIe-volume harness: optional labels[] dump, gated on env var. */
+        {
+            const char* dump_path = getenv("EMOGI_LABEL_DUMP");
+            if (dump_path && dump_path[0]) {
+                uint32_t *label_h_dump = (uint32_t*)malloc(vertex_count * sizeof(uint32_t));
+                if (label_h_dump) {
+                    checkCudaErrors(cudaMemcpy(label_h_dump, label_d, vertex_count * sizeof(uint32_t), cudaMemcpyDeviceToHost));
+                    FILE* lf = fopen(dump_path, "wb");
+                    if (lf) {
+                        fwrite(label_h_dump, sizeof(*label_h_dump), vertex_count, lf);
+                        fclose(lf);
+                        fprintf(stderr, "[emogi] labels dumped to %s\n", dump_path);
+                    } else {
+                        fprintf(stderr, "[emogi] failed to open label dump %s\n", dump_path);
+                    }
+                    free(label_h_dump);
+                } else {
+                    fprintf(stderr, "[emogi] failed to allocate host buffer for label dump\n");
+                }
+            }
+        }
+
         checkCudaErrors(cudaEventRecord(end, 0));
         checkCudaErrors(cudaEventSynchronize(end));
         checkCudaErrors(cudaEventElapsedTime(&milliseconds, start, end));

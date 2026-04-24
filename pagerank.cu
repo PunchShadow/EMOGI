@@ -10,6 +10,9 @@
  */
 
 #include "helper_emogi.h"
+#include <thrust/device_ptr.h>
+#include <thrust/reduce.h>
+#include <thrust/execution_policy.h>
 
 #define MEM_ALIGN MEM_ALIGN_64
 
@@ -348,6 +351,14 @@ int main(int argc, char *argv[]) {
         changed_h = false;
         checkCudaErrors(cudaMemcpy(changed_d, &changed_h, sizeof(bool), cudaMemcpyHostToDevice));
 
+        {
+            thrust::device_ptr<bool> label_ptr(label_d);
+            uint64_t active_cnt = thrust::reduce(thrust::device, label_ptr, label_ptr + vertex_count,
+                                                  (uint64_t)0, thrust::plus<uint64_t>());
+            printf("[EMOGI iter %u] active=%lu\n", iter + 1, (unsigned long)active_cnt);
+            fflush(stdout);
+        }
+
         switch (type) {
             case COALESCE:
                 kernel_coalesce<<<blockDim, numthreads>>>(label_d, delta_d, residual_d, vertex_count, vertexList_d, edgeList_d);
@@ -362,11 +373,22 @@ int main(int argc, char *argv[]) {
         }
 
         update<<<blockDim_update, numthreads>>>(label_d, delta_d, residual_d, value_d, vertex_count, vertexList_d, tolerance, alpha, changed_d);
+        {
+            cudaDeviceSynchronize();
+            thrust::device_ptr<ValueT> r_ptr(residual_d);
+            thrust::device_ptr<ValueT> v_ptr(value_d);
+            ValueT rsum = thrust::reduce(thrust::device, r_ptr, r_ptr + vertex_count, (ValueT)0.0f, thrust::plus<ValueT>());
+            ValueT vsum = thrust::reduce(thrust::device, v_ptr, v_ptr + vertex_count, (ValueT)0.0f, thrust::plus<ValueT>());
+            printf("  [EMOGI iter %u end] sum_residual=%f sum_value=%f\n", iter + 1, rsum, vsum);
+            fflush(stdout);
+        }
 
         checkCudaErrors(cudaMemcpy(&changed_h, changed_d, sizeof(bool), cudaMemcpyDeviceToHost));
 
         iter++;
     } while(changed_h && iter < max_iter);
+
+    fprintf(stderr, "[emogi] pr iterations completed: %u\n", iter);
 
     checkCudaErrors(cudaEventRecord(end, 0));
     checkCudaErrors(cudaEventSynchronize(end));
