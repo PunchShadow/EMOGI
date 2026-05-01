@@ -32,21 +32,13 @@ __global__ void kernel_coalesce(bool *curr_visit, bool *next_visit, uint64_t ver
                 const EdgeT next = edgeList[i];
 
                 unsigned long long comp_next = comp[next];
-                unsigned long long comp_target;
-                EdgeT next_target;
 
-                if (comp_next != comp_src) {
-                    if (comp_src < comp_next) {
-                        next_target = next;
-                        comp_target = comp_src;
-                    }
-                    else {
-                        next_target = warpIdx;
-                        comp_target = comp_next;
-                    }
-
-                    atomicMin(&comp[next_target], comp_target);
-                    next_visit[next_target] = true;
+                // Push-only CC (Thievory/HyTGraph-style): only propagate
+                // src's smaller label to dst. The previous SV-style pull-back
+                // branch (else: update self with comp_next) is removed.
+                if (comp_src < comp_next) {
+                    atomicMin(&comp[next], comp_src);
+                    next_visit[next] = true;
                     *changed = true;
                 }
             }
@@ -80,21 +72,11 @@ __global__ void kernel_coalesce_chunk(bool *curr_visit, bool *next_visit, uint64
                     const EdgeT next = edgeList[j];
 
                     unsigned long long comp_next = comp[next];
-                    unsigned long long comp_target;
-                    EdgeT next_target;
 
-                    if (comp_next != comp_src) {
-                        if (comp_src < comp_next) {
-                            next_target = next;
-                            comp_target = comp_src;
-                        }
-                        else {
-                            next_target = i;
-                            comp_target = comp_next;
-                        }
-
-                        atomicMin(&comp[next_target], comp_target);
-                        next_visit[next_target] = true;
+                    // Push-only CC: only propagate src's smaller label to dst.
+                    if (comp_src < comp_next) {
+                        atomicMin(&comp[next], comp_src);
+                        next_visit[next] = true;
                         *changed = true;
                     }
                 }
